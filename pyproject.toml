@@ -22,6 +22,9 @@ test = [
     "ruff>=0.5",
 ]
 
+[project.scripts]
+mcp-drift-monitor = "mcp_drift_monitor.cli:app"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mcp_drift_monitor*"]
