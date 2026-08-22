@@ -11,7 +11,7 @@ arXiv:2608.00997 reports a critical blind spot in registry drift detection:
 the paper's own measurement panel (19,099 MCP servers observed over 88.6 days,
 120 snapshots) shows that history-ranking approaches fail to detect two failure
 modes — **silent changers** (a server whose description hash moves but was already
-known to the monitor) and **new arrivals** the model never saw during training.
+known to the monitor) and **new arrivals** the monitor has no prior record of.
 The paper measures 15,845 hash-change events, 19,877 additions, and 911 removals,
 yet models that rank by prior history miss a non-trivial slice of these.
 
