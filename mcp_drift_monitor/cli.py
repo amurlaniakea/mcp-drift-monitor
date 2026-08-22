@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -28,6 +29,16 @@ from .core.state import FetchStatus, StateStore
 from .core.sweep import run_sweep
 
 log = logging.getLogger("mcp_drift_monitor.cli")
+
+
+def _now_iso() -> str:
+    """Real UTC timestamp for every fetch (NFR-1: 'when did the change happen').
+
+    Injected into events by the entry point, NOT in the core engine — keeps the
+    core deterministic/testable with fixture timestamps while the CLI produces
+    the real wall-clock time.
+    """
+    return datetime.now(UTC).isoformat()
 
 app = typer.Typer(
     name="mcp-drift-monitor",
@@ -77,18 +88,28 @@ def poll(
         if status == FetchStatus.OK:
             cur = {e.server_id: e.desc_hash for e in entries}
             prior = store.get_all_hashes()
-            drifts, arrivals, removals = compute_events(prior, cur, 0, "")
+            # Real timestamps + monotonic obs_index (NFR-1, FR-5): injected at the
+            # entry point, NOT hardcoded to 0/"" so events record when they happened.
+            obs_index = store.get_next_obs_index()
+            ts = _now_iso()
+            drifts, arrivals, removals = compute_events(prior, cur, obs_index, ts)
             for d in drifts:
                 _emit(sink, {
                     "event": "drift", "server_id": d.server_id,
                     "old_desc_hash": d.old_desc_hash,
                     "new_desc_hash": d.new_desc_hash,
+                    "obs_index": obs_index, "ts": ts,
                 })
             for a in arrivals:
-                _emit(sink, {"event": "arrival", "server_id": a.server_id})
+                _emit(sink, {"event": "arrival", "server_id": a.server_id,
+                             "obs_index": obs_index, "ts": ts})
             for r in removals:
-                _emit(sink, {"event": "removal", "server_id": r.server_id})
-            store.apply(cur, 0, "", FetchStatus.OK)
+                _emit(sink, {"event": "removal", "server_id": r.server_id,
+                             "obs_index": obs_index, "ts": ts})
+            # FR-5: persist the append-only audit trail so drift/arrival/removal
+            # events survive restarts even if the sink output is lost.
+            store.append_events(drifts + arrivals + removals, obs_index=obs_index, ts=ts)
+            store.apply(cur, obs_index, ts, FetchStatus.OK)
             for r in removals:
                 store.mark_removed(r.server_id)
         else:
@@ -120,10 +141,15 @@ def sweep(
             "event": "drift", "server_id": d.server_id,
             "old_desc_hash": d.old_desc_hash,
             "new_desc_hash": d.new_desc_hash,
+            "obs_index": d.obs_index, "ts": d.ts,
         })
 
     try:
-        report = run_sweep(poller, store, on_drift)
+        # Real timestamps + monotonic obs_index (NFR-1, FR-5), passed into the
+        # core sweep so events carry the wall-clock time they actually happened.
+        obs_index = store.get_next_obs_index()
+        ts = _now_iso()
+        report = run_sweep(poller, store, on_drift, obs_index=obs_index, ts=ts)
         _emit(sink, {
             "event": "sweep_report",
             "fetch_status": report.fetch_status.value,

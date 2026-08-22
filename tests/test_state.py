@@ -74,9 +74,9 @@ def test_append_events_is_append_only(tmp_path):
     db = tmp_path / "s.sqlite"
     store = StateStore(str(db))
     ev = DriftEvent("a", "old", "new", 0, "t")
-    store.append_events([ev])
+    store.append_events([ev], obs_index=0, ts="t")
     assert store.event_count() == 1
-    store.append_events([ev, ev])
+    store.append_events([ev, ev], obs_index=1, ts="t2")
     assert store.event_count() == 3  # appended, never replaced
     store.close()
 

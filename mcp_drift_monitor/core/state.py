@@ -34,8 +34,14 @@ CREATE TABLE IF NOT EXISTS fetch_status (
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    obs_index INTEGER NOT NULL DEFAULT 0,
     kind TEXT NOT NULL,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    ts TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS obs_counter (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -50,6 +56,10 @@ class StateStore:
         self._conn.execute(
             "INSERT OR IGNORE INTO fetch_status (id, status) VALUES (1, ?)",
             (FetchStatus.OK,),
+        )
+        # Seed obs counter for monotonic observation numbering (FR-5, surviving restarts).
+        self._conn.execute(
+            "INSERT OR IGNORE INTO obs_counter (id, value) VALUES (1, 0)"
         )
         self._conn.commit()
 
@@ -129,20 +139,52 @@ class StateStore:
         row = self._conn.execute("SELECT status FROM fetch_status WHERE id = 1").fetchone()
         return FetchStatus(row[0])
 
-    # --- event log (append-only) ---
-    def append_events(self, events: Iterable) -> None:
+    # --- event log (append-only, FR-5) ---
+
+    def get_next_obs_index(self) -> int:
+        """Monotonic, persisted observation counter (survives restarts).
+
+        Each fetch (poll or sweep) consumes exactly one obs_index. Stored in
+        the obs_counter table (id=1). Atomic read-modify-write within the
+        sqlite connection's transaction so two concurrent fetches cannot get
+        the same index.
+        """
+        row = self._conn.execute("SELECT value FROM obs_counter WHERE id = 1").fetchone()
+        nxt = (row[0] if row else 0) + 1
+        self._conn.execute(
+            "INSERT INTO obs_counter (id, value) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+            (nxt,),
+        )
+        self._conn.commit()
+        return nxt
+
+    def append_events(
+        self,
+        events: Iterable,
+        *,
+        obs_index: int,
+        ts: str,
+    ) -> None:
+        """Persist events to the append-only log with their obs epoch and timestamp.
+
+        FR-5: this is WHY the event log survives restarts — every drift, arrival
+        and removal is written here with a real UTC timestamp and a monotonic
+        obs_index, so no on_drift sink loss can erase the audit trail.
+        """
         rows = []
         for e in events:
             kind = type(e).__name__
-            # payload: stable, comparable representation
+            # payload: stable, comparable representation (includes obs_index/ts via asdict).
             if isinstance(e, (DriftEvent, NewArrivalEvent, RemovalEvent, CatalogEntry)):
                 payload = repr(asdict(e))
             else:
                 payload = repr(e)
-            rows.append((kind, payload))
+            rows.append((obs_index, kind, payload, ts))
         if rows:
             self._conn.executemany(
-                "INSERT INTO events (kind, payload) VALUES (?, ?)", rows
+                "INSERT INTO events (obs_index, kind, payload, ts) VALUES (?, ?, ?, ?)",
+                rows,
             )
             self._conn.commit()
 

@@ -51,14 +51,23 @@ def run_sweep(
     - Builds prior = state.get_all_hashes() (the real stored snapshot; excludes
       already-marked-removed servers so RemovalEvent fires once).
     - Runs compute_events(prior, current, ...) — the SAME engine as incremental poll.
-    - Persists new snapshot via state.apply(), and state.mark_removed() for each
-      removal so the next sweep does not re-report it.
+    - Persists new snapshot via state.apply(), state.append_events() (FR-5
+      append-only audit log), and state.mark_removed() for each removal so the
+      next sweep does not re-report it.
 
     on_drift(drift_event) is called for each DriftEvent (the content-binding
     revalidation trigger: "revalidate the moment a description's hash moves").
 
-    Returns a SweepReport with counts and the lists of new arrivals / silent
-    changers / removals for KPI-1/2/3.
+    Returns a SweepReport with counts and the lists of new arrivals /
+    removals for KPI-1/2/3.
+
+    Note: silent_changers is intentionally NOT a field — a server with a known
+    prior hash whose hash moves is classified as a DriftEvent by compute_events
+    (prior & current share the id; hashes differ). A server cannot appear in
+    arrivals and be a "silent changer", because arrivals = current - prior by
+    construction (an id in arrivals was NEVER in prior, so it has no old hash).
+    Verified by 5000-case fuzz over compute_events: silent_changers would
+    always be empty. Kept the conceptual coverage in KPI-1 via DriftEvent.
     """
     entries, status = poller.fetch_catalog()
     report = SweepReport(
@@ -82,17 +91,14 @@ def run_sweep(
     report.raw_drifts = list(drifts)
     report.drift_count = len(drifts)
 
-    # silent_changers is intentionally NOT a field: a server with a known prior
-    # hash whose hash moves is classified as a DriftEvent by compute_events
-    # (prior & current share the id; hashes differ). A server cannot be a
-    # "silent changer" appearing in arrivals, because arrivals = current - prior
-    # by construction (an id in arrivals was NEVER in prior, so it has no old hash).
-    # Verified by 5000-case fuzz over compute_events: silent_changers would always
-    # be empty. Kept the conceptual coverage in KPI-1 via DriftEvent, not a dead field.
     report.new_arrivals = [e.server_id for e in arrivals]
     report.arrival_count = len(arrivals)
     report.removals = [r.server_id for r in removals]
     report.removal_count = len(removals)
+
+    # FR-5: append the full audit trail BEFORE apply/mark_removed so the log
+    # survives even if the snapshot persist were to fail downstream.
+    state.append_events(drifts + arrivals + removals, obs_index=obs_index, ts=ts)
 
     # Persist + mark removals so the next sweep does not re-report them.
     state.apply(current, obs_index, ts, FetchStatus.OK)

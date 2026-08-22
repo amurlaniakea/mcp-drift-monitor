@@ -142,3 +142,18 @@ def test_sweep_report_has_obs_and_ts(tmp_path):
     assert isinstance(report, SweepReport)
     assert report.obs_index == 7 and report.ts == "2026-08-23T00:00:00Z"
     store.close()
+
+
+def test_sweep_persists_events_to_audit_log(tmp_path):
+    """FR-5: run_sweep must append drift/arrival/removal events to the StateStore's
+    append-only sqlite event log — not just emit them to the on_drift callback."""
+    db = tmp_path / "s.sqlite"
+    store = StateStore(str(db))
+    store.apply({"stay": "h_old", "gone": "h_old"}, 0, "t", FetchStatus.OK)
+    poller, _ = _make_poller([
+        _FakeResponse(200, _ok_payload([("stay", "h_new"), ("arrive", "first")])),
+    ])
+    run_sweep(poller, store, lambda d: None, ts="t1", obs_index=1)
+    # 1 drift (stay) + 1 arrival (arrive) + 1 removal (gone) = 3 events in the log.
+    assert store.event_count() == 3
+    store.close()

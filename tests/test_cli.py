@@ -70,3 +70,75 @@ def test_poll_cli_bad_sink_rejected(tmp_path):
         app, ["replay", "--panel-path", PANEL_PATH, "--sink", "bogus:foo"]
     )
     assert result.exit_code != 0
+
+
+def test_now_iso_produces_real_utc_timestamps():
+    """NFR-1: CLI must emit real UTC timestamps, never the hardcoded ""."""
+    from mcp_drift_monitor.cli import _now_iso
+
+    ts1 = _now_iso()
+    assert ts1 != ""
+    assert "T" in ts1  # ISO 8601
+    # Must carry UTC timezone designator (Z or +00:00).
+    assert ts1.endswith("Z") or "+00:00" in ts1
+
+
+def test_two_real_timestamps_are_distinct(monkeypatch):
+    """Two invocations produce distinct timestamps (not a constant)."""
+    import time
+
+    from mcp_drift_monitor.cli import _now_iso
+
+    ts_a = _now_iso()
+    # Real wall clock advances; force a measurable gap so they cannot be equal.
+    time.sleep(0.005)
+    ts_b = _now_iso()
+    assert ts_a != ts_b
+
+
+def test_sweep_cli_uses_real_obs_index_and_ts(tmp_path):
+    """FR-5 + NFR-1 integration: a live sweep must consume a real monotonic
+    obs_index from the persisted counter and emit a non-empty real ts — not
+    the 0/"" defaults that existed before this fix.
+
+    Uses a fake poller (duck-typed) to avoid network; the unit test_diff already
+    covers the diff logic — here we assert the CLI/sweep wiring of timestamp
+    + obs index through to the event log.
+    """
+    from typing import cast
+
+    from mcp_drift_monitor.cli import _now_iso
+    from mcp_drift_monitor.core import poller as poller_mod
+    from mcp_drift_monitor.core.diff import CatalogEntry
+    from mcp_drift_monitor.core.state import FetchStatus, StateStore
+    from mcp_drift_monitor.core.sweep import run_sweep
+
+    db = str(tmp_path / "s.sqlite")
+    store = StateStore(db)
+
+    # Seed one known server so the sweep has a 'prior' to diff against.
+    store.apply({"s1": "h1"}, 0, "", FetchStatus.OK)
+
+    class _FakePoller:
+        """Duck-typed Poller: fetch_catalog returns (entries, status)."""
+        def fetch_catalog(self):
+            # s1 changed -> 1 drift; s2 is new -> 1 arrival; 0 removals.
+            return [CatalogEntry("s1", "h2"), CatalogEntry("s2", "h3")], FetchStatus.OK
+
+    fp = cast(poller_mod.Poller, _FakePoller())
+    obs_index = store.get_next_obs_index()
+    ts = _now_iso()
+    assert obs_index == 1  # first call after seeding counter
+    assert ts != ""  # real, not hardcoded
+
+    seen = []
+    report = run_sweep(fp, store, on_drift=seen.append, obs_index=obs_index, ts=ts)
+    assert report.fetch_status == FetchStatus.OK
+    assert report.drift_count == 1  # s1 changed
+    assert len(seen) == 1
+    assert seen[0].server_id == "s1"
+    assert seen[0].obs_index == obs_index  # drift carries the REAL obs index
+    assert seen[0].ts == ts  # drift carries the REAL timestamp
+    # FR-5: the event log was actually persisted inside run_sweep (drift + arrival).
+    assert store.event_count() == 2
+    store.close()
