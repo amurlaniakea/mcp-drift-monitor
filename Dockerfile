@@ -10,23 +10,38 @@ RUN groupadd -r -g 1001 appuser && \
 
 WORKDIR /app
 
-# Copy project files
+# Copy project metadata first (pyproject.toml is the SINGLE SOURCE OF TRUTH for
+# runtime deps: requests + typer). We install the package itself, not a hardcoded
+# pip line, so the image and pyproject can never drift apart.
 COPY pyproject.toml ./
 
-# Install dependencies
+# Install dependencies + the package from pyproject (runtime extras only; the
+# [test] extras — pytest/ruff — are deliberately NOT installed in the image).
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir "requests>=2.31" "typer>=0.12"
+    pip install --no-cache-dir .
 
 # Copy source code
 COPY mcp_drift_monitor/ mcp_drift_monitor/
 
-# Create data directory for SQLite database (managed by state.py)
+# Embed the calibration panel so `replay` works out of the box.
+# Decide: panel is BAKED INTO THE IMAGE (simple, reproducible). If you prefer to
+# keep a newer panel without rebuilding, mount it over the volume instead:
+#   docker run -v /path/to/panel:/app/data amurlaniakea/mcp-drift-monitor:local \
+#     replay --panel data/mcp_registry_drift_panel_v1.jsonl
+COPY data/ data/
+
+# Create data directory for the SQLite database (managed by state.py).
+# /app/data is the PERSISTENT volume: pass --db /app/data/drift.sqlite so the
+# state survives container restarts (the default --db is "drift.sqlite", which
+# resolves to /app/drift.sqlite OUTSIDE the volume and would be lost on restart).
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
-# Volume declaration for persistent SQLite database storage
+# Volume declaration for persistent SQLite database storage.
+# Mount a named volume or host dir here AND pass --db /app/data/drift.sqlite:
+#   docker run -v mcp-data:/app/data ... --db /app/data/drift.sqlite
 VOLUME ["/app/data"]
 
 ENTRYPOINT ["python", "-m", "mcp_drift_monitor.cli"]

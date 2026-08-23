@@ -69,10 +69,33 @@ pip install -e ".[test]"
 
 ### Con Docker
 
+El panel de calibración (`data/`) viene **embebido en la imagen**, así que
+`replay` funciona sin pasos extra. Si prefieres usar un panel más nuevo sin
+reconstruir, monta tu propio directorio sobre `/app/data` al arrancar.
+
+**Importante sobre la persistencia del estado:** el flag `--db` por defecto es
+`drift.sqlite` (relativo → `/app/drift.sqlite`), que queda **FUERA** del volumen
+`/app/data` y se pierde al reiniciar el contenedor. Para que el estado sobreviva,
+pasa siempre `--db /app/data/drift.sqlite`.
+
 ```bash
+# Construir la imagen local
 docker build -t mcp-drift-monitor:local .
+
+# Barrido completo (CONTROL PRIMARIO). --feed-url es OBLIGATORIO y el estado
+# persiste en el volumen gracias a --db /app/data/drift.sqlite.
 docker run -v mcp-data:/app/data --name drift-monitor-prod -d \
-  mcp-drift-monitor:local sweep
+  mcp-drift-monitor:local sweep \
+  --feed-url https://registry.example/servers \
+  --db /app/data/drift.sqlite
+
+# Replay de calibración (panel ya embebido en /app/data)
+docker run --rm mcp-drift-monitor:local \
+  replay --panel-path data/mcp_registry_drift_panel_v1.jsonl
+
+# Para usar tu propio panel sin reconstruir la imagen, monta tu dir sobre /app/data:
+docker run --rm -v /ruta/a/mi/panel:/app/data mcp-drift-monitor:local \
+  replay --panel-path data/mcp_registry_drift_panel_v1.jsonl
 ```
 
 ## Uso
@@ -128,7 +151,7 @@ mcp-drift-monitor sweep --feed-url https://registry.example/servers
 mcp-drift-monitor poll --feed-url https://registry.example/servers
 
 # Replay de calibración contra el panel real del paper (FR-6, AC-1/2/3)
-mcp-drift-monitor replay --panel data/mcp_registry_drift_panel_v1.jsonl
+mcp-drift-monitor replay --panel-path data/mcp_registry_drift_panel_v1.jsonl
 
 # Placeholder del watcher en vivo (aún no implementado; usa poll/sweep)
 mcp-drift-monitor serve

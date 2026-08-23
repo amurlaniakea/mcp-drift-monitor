@@ -1,0 +1,12 @@
+# Keep the Docker build context lean and avoid leaking host artifacts into the image.
+.venv/
+.hermes/
+.git/
+.gitignore
+.pytest_cache/
+.ruff_cache/
+*.pyc
+__pycache__/
+mcp_drift_monitor.egg-info/
+*.sqlite
+*.ndjson
