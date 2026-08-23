@@ -142,3 +142,103 @@ def test_sweep_cli_uses_real_obs_index_and_ts(tmp_path):
     # FR-5: the event log was actually persisted inside run_sweep (drift + arrival).
     assert store.event_count() == 2
     store.close()
+
+
+def test_poll_cli_file_sink(tmp_path, monkeypatch):
+    """FR-7 (sink pluggable) at the CLI level for `poll`: a real `poll` invocation
+    against a fake feed must write NDJSON to a --sink file: path and emit events
+    carrying real obs_index/ts. Previously only `replay` had a sink test; poll/sweep
+    command bodies (cli.py 77-118 / 134-163) were uncovered.
+    """
+    from mcp_drift_monitor.cli import app
+    from mcp_drift_monitor.core.diff import CatalogEntry
+    from mcp_drift_monitor.core.poller import FetchStatus
+
+    class _FakePoller:
+        def __init__(self, *a, **k):
+            pass
+
+        def fetch_catalog(self):
+            # s1 changed vs empty prior -> arrival; s2 new -> arrival.
+            return [CatalogEntry("s1", "h9"), CatalogEntry("s2", "h3")], FetchStatus.OK
+
+    monkeypatch.setattr("mcp_drift_monitor.cli.Poller", _FakePoller)
+
+    db = tmp_path / "poll.sqlite"
+    out = tmp_path / "poll.ndjson"
+    result = runner.invoke(
+        app,
+        ["poll", "--feed-url", "http://fake.local/feed", "--db", str(db),
+         "--sink", f"file:{out}"],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    import json
+
+    lines = out.read_text().strip().splitlines()
+    # first line is the poll status event; following lines are arrival events.
+    assert len(lines) >= 2
+    first = json.loads(lines[0])
+    assert first["event"] == "poll"
+    assert first["status"] == "ok"
+    arrivals = [json.loads(ln) for ln in lines[1:] if json.loads(ln)["event"] == "arrival"]
+    assert len(arrivals) == 2
+    # events carry a real (non-empty) obs_index + ts, not the 0/"" defaults.
+    assert all(a["obs_index"] >= 1 for a in arrivals)
+    assert all(a["ts"] not in ("", None) for a in arrivals)
+
+
+def test_sweep_cli_file_sink(tmp_path, monkeypatch):
+    """FR-7 (sink pluggable) at the CLI level for `sweep`: a real `sweep` invocation
+    against a fake feed must write NDJSON to --sink file: and emit a drift event
+    (via on_drift) carrying real obs_index/ts, plus a sweep_report. Closes the
+    cli.py 134-163 coverage gap.
+
+    Note: `sweep` emits individual DRIFT events (through on_drift) and a summary
+    sweep_report with arrival/removal counts; it does NOT emit per-arrival events
+    (unlike `poll`). So we seed a known server (s1) so the fake feed produces a
+    real drift, exercising the on_drift -> _emit path with real obs_index/ts.
+    """
+    from mcp_drift_monitor.cli import app
+    from mcp_drift_monitor.core.diff import CatalogEntry
+    from mcp_drift_monitor.core.poller import FetchStatus
+    from mcp_drift_monitor.core.state import FetchStatus as SStatus
+    from mcp_drift_monitor.core.state import StateStore
+
+    class _FakePoller:
+        def __init__(self, *a, **k):
+            pass
+
+        def fetch_catalog(self):
+            # s1 changed (was h_old) -> drift; s2 new -> arrival.
+            return [CatalogEntry("s1", "h_new"), CatalogEntry("s2", "h3")], FetchStatus.OK
+
+    monkeypatch.setattr("mcp_drift_monitor.cli.Poller", _FakePoller)
+
+    db = tmp_path / "sweep.sqlite"
+    # Seed prior so s1 is a known server -> the sweep reports a real drift.
+    seed = StateStore(str(db))
+    seed.apply({"s1": "h_old"}, 0, "t", SStatus.OK)
+    seed.close()
+
+    out = tmp_path / "sweep.ndjson"
+    result = runner.invoke(
+        app,
+        ["sweep", "--feed-url", "http://fake.local/feed", "--db", str(db),
+         "--sink", f"file:{out}"],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    import json
+
+    lines = out.read_text().strip().splitlines()
+    report = json.loads(lines[-1])
+    assert report["event"] == "sweep_report"
+    assert report["fetch_status"] == "ok"
+    assert report["drift_count"] == 1
+    assert report["arrival_count"] == 1
+    drifts = [json.loads(ln) for ln in lines if json.loads(ln)["event"] == "drift"]
+    assert len(drifts) == 1
+    # the drift event carries a real (non-empty) obs_index + ts, not 0/"".
+    assert drifts[0]["obs_index"] >= 1
+    assert drifts[0]["ts"] not in ("", None)
