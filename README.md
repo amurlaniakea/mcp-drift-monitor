@@ -169,8 +169,24 @@ mcp-drift-monitor poll --feed-url https://registry.example/servers \
   --sink file:poll-events.ndjson
 
 # Replay a archivo
-mcp-drift-monitor replay --panel data/mcp_registry_drift_panel_v1.jsonl \
+mcp-drift-monitor replay --panel-path data/mcp_registry_drift_panel_v1.jsonl \
   --sink file:replay-report.ndjson
+```
+
+**En Docker (usuario non-root `appuser`):** el destino de `--sink file:` debe ser
+un path escribible por `appuser`. Usa el volumen de datos y apunta bajo `/app/data/`,
+igual que con `--db`:
+
+```bash
+# En el contenedor, escribir el sink bajo /app/data (ya chown appuser):
+docker run --rm -v mcp-data:/app/data mcp-drift-monitor:local \
+  sweep --feed-url https://registry.example/servers \
+  --db /app/data/drift.sqlite \
+  --sink file:/app/data/drift-events.ndjson
+
+docker run --rm -v mcp-data:/app/data mcp-drift-monitor:local \
+  replay --panel-path data/mcp_registry_drift_panel_v1.jsonl \
+  --sink file:/app/data/replay-report.ndjson
 ```
 
 Cada evento emitido lleva `obs_index` y `ts` reales (UTC), p. ej.:

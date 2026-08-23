@@ -10,25 +10,29 @@ RUN groupadd -r -g 1001 appuser && \
 
 WORKDIR /app
 
-# Copy project metadata first (pyproject.toml is the SINGLE SOURCE OF TRUTH for
-# runtime deps: requests + typer). We install the package itself, not a hardcoded
-# pip line, so the image and pyproject can never drift apart.
+# pyproject.toml is the SINGLE SOURCE OF TRUTH for runtime deps (requests + typer)
+# AND the package metadata. We install from it (never a hardcoded pip line) so the
+# image and pyproject can never drift apart.
+#
+# BUG #5 fix: the source tree AND pyproject MUST be present before `pip install .`,
+# otherwise pip builds an EMPTY wheel (the code was not copied yet) and installs a
+# "mcp-drift-monitor" package with no modules — the `mcp-drift-monitor` entry point
+# then fails with ModuleNotFoundError. So we COPY pyproject + code + data FIRST, then
+# install. (This trades away a separate dependency-cache layer; correctness wins.)
 COPY pyproject.toml ./
-
-# Install dependencies + the package from pyproject (runtime extras only; the
-# [test] extras — pytest/ruff — are deliberately NOT installed in the image).
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
-
-# Copy source code
 COPY mcp_drift_monitor/ mcp_drift_monitor/
 
 # Embed the calibration panel so `replay` works out of the box.
 # Decide: panel is BAKED INTO THE IMAGE (simple, reproducible). If you prefer to
 # keep a newer panel without rebuilding, mount it over the volume instead:
 #   docker run -v /path/to/panel:/app/data amurlaniakea/mcp-drift-monitor:local \
-#     replay --panel data/mcp_registry_drift_panel_v1.jsonl
+#     replay --panel-path data/mcp_registry_drift_panel_v1.jsonl
 COPY data/ data/
+
+# Install the package (with real modules) + its deps from pyproject.toml.
+# [test] extras (pytest/ruff) are deliberately NOT installed in the image.
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir .
 
 # Create data directory for the SQLite database (managed by state.py).
 # /app/data is the PERSISTENT volume: pass --db /app/data/drift.sqlite so the
