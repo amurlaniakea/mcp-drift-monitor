@@ -274,7 +274,7 @@ Si utilizas este software en investigación, por favor cita el paper subyacente:
 ```
 @misc{sordo2026mcp-drift-monitor,
   title={mcp-drift-monitor: Continuous MCP Registry Drift Monitor},
-  author={Sordo Mart{\\\\'i}nez, Pedro},
+  author={Sordo Martínez, Pedro},
   year={2026},
   url={https://github.com/amurlaniakea/mcp-drift-monitor},
   license={AGPL-3.0-or-later}
