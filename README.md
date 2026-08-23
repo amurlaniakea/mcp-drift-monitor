@@ -259,7 +259,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Pedro Sordo Martínez <amurlaniakea@gmail.com>
 
 Consulta [LICENSE](LICENSE) para el texto completo (661 líneas, texto
-verbatim desde https://www.gnu.org/licenses/agpl-3.0.txt).
+verbatim oficial extraído de <https://www.gnu.org/licenses/agpl-3.0.txt>).
 
 > **Nota sobre AGPL §13:** Al ser AGPL, si ejecutas esta herramienta como un
 > servicio de red, debes poner a disposición del público el código fuente de
