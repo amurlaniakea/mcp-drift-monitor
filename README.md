@@ -1,44 +1,64 @@
 # mcp-drift-monitor
 
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.txt)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.txt)
+[![Docker](https://img.shields.io/badge/Docker-mcp--drift--monitor%3Alocal-blue?logo=docker)](https://github.com/amurlaniakea/mcp-drift-monitor)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)](https://www.python.org/)
 
-Continuous MCP Registry Drift Monitor with content-binding revalidation — closes
-the gap identified in [arXiv:2608.00997](https://arxiv.org/abs/2608.00997).
+## ¿Qué es y para qué sirve?
 
-## Problem
+**mcp-drift-monitor** es una herramienta de código abierto que detecta cambios no
+autorizados en los servidores MCP (Model Context Protocol). Monitorea
+continuamente un registro público de servidores MCP y alerta cuando alguno
+cambia su descripción, hash de contenido, o desaparece de forma inesperada.
 
-arXiv:2608.00997 reports a critical blind spot in registry drift detection:
-the paper's own measurement panel (19,099 MCP servers observed over 88.6 days,
-120 snapshots) shows that history-ranking approaches fail to detect two failure
-modes — **silent changers** (a server whose description hash moves but was already
-known to the monitor) and **new arrivals** the monitor has no prior record of.
-The paper measures 15,845 hash-change events, 19,877 additions, and 911 removals,
-yet models that rank by prior history miss a non-trivial slice of these.
+**¿Por qué es necesario?** Según el paper de investigación
+[arXiv:2608.00997](https://arxiv.org/abs/2608.00997) (*"MCP Registry Drift:
+A 88.6-Day Measurement of 19,099 Servers"*), los enfoques tradicionales de
+detección de cambios fallan en identificar dos modos de fallo críticos:
 
-This monitor deploys the paper's **missing PRIMARY control**: a periodic
-**full-catalog sweep** that re-fetches the entire registry and recomputes all
-hashes in one pass via a single diff engine (`compute_events`). It is the
-control that defeats "blind-to-new-arrivals".
+1. **Cambios silenciosos** — un servidor cuyo hash de descripción cambia pero
+   el monitor ya lo conocía y lo rankinga por historial pasado.
+2. **Nuevas adiciones** — servidores que aparecen en el registro pero el
+   monitor no tiene registro previo.
 
-## Features
+Este monitor implementa el **control primario faltante** descrito en el paper:
+un barrido periódico completo del catálogo (**full-catalog sweep**) que
+re-descarga todo el registro y recomputa todos los hashes en una sola pasada,
+garantizando que ningún cambio pase desapercibido.
 
-- **Single diff engine** (`compute_events`) serving both incremental poll and full
-  sweep — no duplicated or divergent logic.
-- **Deterministic ordering** (sorted by `server_id`) across processes — verified
-  at scale against the paper's 36,753-row panel via byte-identical two-runs replay
-  (AC-3).
-- **Content-binding revalidation**: revalidates the moment any description hash
-  moves — `len(drifts) > 0` is the sole trigger.
-- **Rate-limit safe**: 429 + `Retry-After` backoff → retry; retry exhaustion →
-  `FetchStatus.FAILED` (never a silent empty list treated as "OK").
-- **Schema-drift fail-safe**: malformed registry envelopes raise
-  `SchemaDriftError` and **log the offending payload at ERROR** (NFR-3) with a
-  `.raw_payload` attribute for operators.
-- **Calibrated against the paper's measurement** (AC-1/2/3): 15,845 chg, 19,877
-  add, 911 del, 19,099 distinct servers — verified, not asserted.
-- **AGPL-3.0-or-later** (SPDX `AGPL-3.0-or-later`).
+### Utilidad concreta
 
-## Install
+- **Seguridad**: Detecta si un servidor MCP ha sido modificado o reemplazado
+  por una versión maliciosa sin que el operador lo note.
+- **Integridad de cadenas de suministro**: Verifica que los servidores MCP
+  que usas en producción no hayan sido modificados sin autorización.
+- **Auditoría de cumplimiento**: Mantiene un historial completo de cambios
+  para auditorías de seguridad y cumplimiento.
+- **Validación científica**: Calibrado y verificado contra el panel real de
+  19,099 servidores del paper (15,845 cambios, 19,877 adiciones, 911
+  eliminaciones).
+
+## Características
+
+- **Motor de diferencias único** (`compute_events`) que sirve tanto para polling
+  incremental como para barridos completos — sin lógica duplicada.
+- **Ordenamiento determinista** (por `server_id`) entre procesos — verificado
+  a gran escala contra el panel del paper (36,753 filas) con resultados
+  idénticos byte a byte en dos ejecuciones (AC-3).
+- **Revalidación de enlaces de contenido**: revalida cada vez que cualquier
+  hash de descripción cambia — `len(drifts) > 0` es el único disparador.
+- **Gestión de límites de velocidad**: backoff de 429 + `Retry-After`;
+  agotamiento de reintentos → `FetchStatus.FAILED` (nunca una lista vacía
+  silenciosa tratada como "OK").
+- **Protección contra desviaciones de esquema**: sobres malformados lanzan
+  `SchemaDriftError` y registran el payload ofensor a nivel ERROR (NFR-3).
+- **Calibrado contra el paper** (AC-1/2/3): resultados verificados, no
+  simples afirmaciones.
+- **Licencia AGPL-3.0-or-later** (SPDX: `AGPL-3.0-or-later`).
+
+## Instalación
+
+### Como librería (recomendado)
 
 ```bash
 git clone https://github.com/amurlaniakea/mcp-drift-monitor.git
@@ -47,7 +67,17 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 ```
 
-## Usage
+### Con Docker
+
+```bash
+docker build -t mcp-drift-monitor:local .
+docker run -v mcp-data:/app/data --name drift-monitor-prod -d \
+  mcp-drift-monitor:local sweep
+```
+
+## Uso
+
+### API Python
 
 ```python
 from mcp_drift_monitor.core.poller import Poller, PollConfig
@@ -55,14 +85,32 @@ from mcp_drift_monitor.core.sweep import run_sweep
 from mcp_drift_monitor.core.state import StateStore
 from mcp_drift_monitor.core.calibrate import replay
 
-# Live sweep
+# Barrido en vivo sobre un feed MCP
 poller = Poller(PollConfig(feed_url="https://registry.example/servers"))
 state = StateStore("drift.sqlite")
-report = run_sweep(poller, state, on_drift=lambda d: print(f"drift: {d.server_id}"))
+report = run_sweep(
+    poller, state,
+    on_drift=lambda d: print(f"Cambio detectado: {d.server_id}")
+)
 
-# Offline replay against the paper's panel
+# Replay offline contra el panel del paper
 r = replay("data/mcp_registry_drift_panel_v1.jsonl")
-print(r.drift_events, r.arrival_events, r.removal_events)
+print(f"Eventos de drift: {r.drift_events}")
+print(f"Nuevas adiciones: {r.arrival_events}")
+print(f"Eliminaciones: {r.removal_events}")
+```
+
+### CLI
+
+```bash
+# Barrido completo (control primario)
+mcp-drift-monitor sweep
+
+# Polling incremental
+mcp-drift-monitor poll --feed-url https://registry.example/servers
+
+# Replay de calibración
+mcp-drift-monitor replay --panel data/mcp_registry_drift_panel_v1.jsonl
 ```
 
 ## Tests
@@ -71,72 +119,80 @@ print(r.drift_events, r.arrival_events, r.removal_events)
 ruff check mcp_drift_monitor tests && pytest -v
 ```
 
-Test suites:
-- `tests/test_diff.py` — pure diff engine (determinism, ordering, event disjointness).
-- `tests/test_hasher.py` — NFC normalization + hashing edge cases.
-- `tests/test_poller.py` — 429 backoff, retry exhaustion, schema-drift logging.
-- `tests/test_state.py` — StateStore persistence, removed-flag, single-source dataclass.
-- `tests/test_sweep.py` — full-sweep PRIMARY control (new arrival, silent changer).
-- `tests/test_replay_panel.py` — [EXTERNAL-VALIDITY] AC-1/2/3 against the real paper panel.
+Suit de tests:
+- `tests/test_diff.py` — motor de diferencias (determinismo, orden, disjunción de eventos).
+- `tests/test_hasher.py` — normalización NFC + casos límite de hashing.
+- `tests/test_poller.py` — backoff 429, agotamiento de reintentos, registro de desviaciones de esquema.
+- `tests/test_state.py` — persistencia de StateStore, flag eliminado, dataclass fuente única.
+- `tests/test_sweep.py` — control primario de barrido completo (nueva adición, cambio silencioso).
+- `tests/test_replay_panel.py` — [EXTERNAL-VALIDITY] AC-1/2/3 contra el panel real del paper.
 
-## Architecture
+## Arquitectura
 
 ```
 core/
-  diff.py     — CatalogEntry, DriftEvent, NewArrivalEvent, RemovalEvent, compute_events
-  hasher.py   — normalize_description (NFC), hash_description
-  state.py    — StateStore (sqlite), FetchStatus, removed flag, get_all_hashes
-  poller.py   — Poller.fetch_catalog, PollConfig, SchemaDriftError, backoff
-  sweep.py    — run_sweep (PRIMARY control), SweepReport
-  calibrate.py — replay (FR-6), ReplayReport, external validity vs panel
+  diff.py      — CatalogEntry, DriftEvent, NewArrivalEvent, RemovalEvent, compute_events
+  hasher.py    — normalize_description (NFC), hash_description
+  state.py     — StateStore (sqlite), FetchStatus, flag 'removed', get_all_hashes
+  poller.py    — Poller.fetch_catalog, PollConfig, SchemaDriftError, backoff
+  sweep.py     — run_sweep (control primario), SweepReport
+  calibrate.py — replay (FR-6), ReplayReport, validación externa vs panel
 ```
 
 ## Calibration (FR-6)
 
-`calibrate.replay(panel_path)` reconstructs the catalog per obs snapshot from the
-panel's add/chg/del stream and runs `compute_events` on each adjacent transition.
-The panel's `d` field is an **opaque hash token** (not reinterpreted as sha256).
+`calibrate.replay(panel_path)` reconstruye el catálogo por snapshot de
+observación a partir del flujo de adiciones/cambios/eliminaciones del panel y
+ejecuta `compute_events` sobre cada transición adyacente. El campo `d` del
+panel es un **token hash opaco** (no reinterpretado como sha256).
 
-Ground-truth counts verified:
-| Panel event | Count | compute_events (net) |
-|-------------|-------|---------------------|
-| `add`       | 19,877 | 16,367 + 3,510 seed = 19,877 ✓ |
-| `chg`       | 15,845 | 2,514 net drifts (≤ chg) ✓ |
-| `del`       |    911 | 911 removals ✓ |
+Resultados verificados:
 
-`arrival_events == add_count` and `removal_events == del_count` hold for THIS
-panel because **no server is deleted-and-readded within the same inter-snapshot
-interval** (0 precondition violations). A future panel that violates this
-would fail the precondition test loudly rather than silently producing wrong KPIs.
+| Evento del panel | Recuento | compute_events (neto) |
+|-------------------|----------|-----------------------|
+| `add`             | 19,877   | 16,367 + 3,510 seed = 19,877 ✓ |
+| `chg`             | 15,845   | 2,514 drift netos (≤ chg) ✓ |
+| `del`             | 911      | 911 eliminaciones ✓ |
 
-## License
+`arrival_events == add_count` y `removal_events == del_count` se cumplen para
+este panel porque **ningún servidor es eliminado y re-agregado dentro del
+mismo intervalo inter-snapshot** (0 violaciones de precondición). Un panel
+futuro que viole esto fallaría en la prueba de precondición de forma
+explícita en lugar de producir silenciosamente KPIs incorrectos.
 
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU Affero General Public License as published by the Free
-Software Foundation, either version 3 of the License, or (at your option) any
-later version.
+## Referencia del paper
+
+- **Título**: *MCP Registry Drift: A 88.6-Day Measurement of 19,099 Servers*
+- **arXiv**: [arXiv:2608.00997](https://arxiv.org/abs/2608.00997)
+- **Autores**: Pedro Sordo Martínez (amurlaniakea)
+
+## Licencia
+
+Este programa es software libre: puedes redistribuirlo y/o modificarlo bajo
+los términos de la Licencia GNU Affero General Public License tal como la
+publica la Free Software Foundation, ya sea la versión 3 de la Licencia, o
+(con tu opción) cualquier versión posterior.
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Pedro Sordo Martínez <amurlaniakea@gmail.com>
 
-See [LICENSE](LICENSE) for the full verbatim text (661 lines, verbatim from
-<https://www.gnu.org/licenses/agpl-3.0.txt>).
+Consulta [LICENSE](LICENSE) para el texto completo (661 líneas, texto
+verbatim desde https://www.gnu.org/licenses/agpl-3.0.txt).
 
-> **AGPL §13 note:** Because this is AGPL, if you run it as a network service
-> you must make the source of your modified version available to users
-> interacting with it remotely.
+> **Nota sobre AGPL §13:** Al ser AGPL, si ejecutas esta herramienta como un
+> servicio de red, debes poner a disposición del público el código fuente de
+> tu versión modificada a quienes interactúan con ella de forma remota.
 
-## Citation
+## Cita
 
-If you use this software in research, please cite the underlying measurement
-paper:
+Si utilizas este software en investigación, por favor cita el paper subyacente:
 
 > arXiv:2608.00997 — *MCP Registry Drift: A 88.6-Day Measurement of 19,099 Servers*
 
 ```
 @misc{sordo2026mcp-drift-monitor,
   title={mcp-drift-monitor: Continuous MCP Registry Drift Monitor},
-  author={Sordo Mart{\\'i}nez, Pedro},
+  author={Sordo Mart{\\\\'i}nez, Pedro},
   year={2026},
   url={https://github.com/amurlaniakea/mcp-drift-monitor},
   license={AGPL-3.0-or-later}
