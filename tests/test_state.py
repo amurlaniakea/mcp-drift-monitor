@@ -143,3 +143,55 @@ def test_resurrected_server_reclassified_as_arrival(tmp_path):
     assert store.get_removed_ids() == set()
     assert store.get_all_hashes() == {"a": "h1", "b": "h2-new"}
     store.close()
+
+
+def test_get_next_obs_index_concurrent_no_duplicates(tmp_path):
+    # Guards the T8 concurrency fix: get_next_obs_index() must be atomic across
+    # SEPARATE PROCESSES (each its own sqlite connection), not just threads.
+    # Reproduces the auditor's hammer: N real python processes each grab one
+    # index from the same sqlite file simultaneously; the set must contain no
+    # duplicates and span exactly 1..N.
+    import subprocess
+    import sys
+    import tempfile
+
+    db = tmp_path / "concurrent.sqlite"
+    # Pre-seed the schema + counter with one writer so the file exists.
+    _seed = StateStore(str(db))
+    _seed.close()
+
+    n_procs = 30
+    worker = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+    worker.write(
+        "import sys\n"
+        "from mcp_drift_monitor.core.state import StateStore\n"
+        "db = sys.argv[1]\n"
+        "s = StateStore(db)\n"
+        "print(s.get_next_obs_index())\n"
+        "s.close()\n"
+    )
+    worker.close()
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, worker.name, str(db)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for _ in range(n_procs)
+    ]
+    indices = []
+    for p in procs:
+        out, _ = p.communicate()
+        assert p.returncode == 0, f"worker failed: {out!r}"
+        indices.append(int(out.strip()))
+
+    assert len(indices) == n_procs
+    assert sorted(indices) == list(range(1, n_procs + 1)), (
+        f"DUPLICATE/MISSING indices under concurrency: {sorted(indices)}"
+    )
+    # The counter must have advanced exactly N times (no double-count, no gap).
+    final = StateStore(str(db))
+    assert final._conn.execute("SELECT value FROM obs_counter WHERE id = 1").fetchone()[0] == n_procs
+    final.close()

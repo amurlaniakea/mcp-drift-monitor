@@ -77,9 +77,16 @@ docker run -v mcp-data:/app/data --name drift-monitor-prod -d \
 
 ## Uso
 
-### API Python
+### API Python (bajo nivel)
+
+`run_sweep` / `compute_events` requieren un `obs_index` y un `ts` reales (no
+`0` / `""`): el índice de observación sale de `state.get_next_obs_index()` y el
+timestamp de `datetime.now(UTC)`. Este es el MISMO patrón que usa `cli.py` — no
+lo omitas en tu propio código, o los eventos quedarán sin `obs_index`/`ts`.
 
 ```python
+from datetime import UTC, datetime
+
 from mcp_drift_monitor.core.poller import Poller, PollConfig
 from mcp_drift_monitor.core.sweep import run_sweep
 from mcp_drift_monitor.core.state import StateStore
@@ -88,10 +95,18 @@ from mcp_drift_monitor.core.calibrate import replay
 # Barrido en vivo sobre un feed MCP
 poller = Poller(PollConfig(feed_url="https://registry.example/servers"))
 state = StateStore("drift.sqlite")
+
+# índice de observación MONÓTONO + timestamp UTC REALES (NFR-1, FR-5).
+obs_index = state.get_next_obs_index()
+ts = datetime.now(UTC).isoformat()
 report = run_sweep(
     poller, state,
-    on_drift=lambda d: print(f"Cambio detectado: {d.server_id}")
+    on_drift=lambda d: print(f"Cambio detectado: {d.server_id}"),
+    obs_index=obs_index, ts=ts,
 )
+print(f"fetch_status={report.fetch_status.value} "
+      f"drifts={report.drift_count} arrivals={report.arrival_count} "
+      f"removals={report.removal_count}")
 
 # Replay offline contra el panel del paper
 r = replay("data/mcp_registry_drift_panel_v1.jsonl")
@@ -100,17 +115,45 @@ print(f"Nuevas adiciones: {r.arrival_events}")
 print(f"Eliminaciones: {r.removal_events}")
 ```
 
-### CLI
+### CLI (entregable principal de T7)
+
+El CLI es la interfaz recomendada. Todos los subcomandos aceptan `--sink`
+(`stdout` por defecto, o `file:<ruta>` para volcar salida NDJSON a disco).
 
 ```bash
-# Barrido completo (control primario)
-mcp-drift-monitor sweep
+# Barrido completo del catálogo — CONTROL PRIMARIO (FR-4)
+mcp-drift-monitor sweep --feed-url https://registry.example/servers
 
-# Polling incremental
+# Polling incremental (un único fetch contra el feed)
 mcp-drift-monitor poll --feed-url https://registry.example/servers
 
-# Replay de calibración
+# Replay de calibración contra el panel real del paper (FR-6, AC-1/2/3)
 mcp-drift-monitor replay --panel data/mcp_registry_drift_panel_v1.jsonl
+
+# Placeholder del watcher en vivo (aún no implementado; usa poll/sweep)
+mcp-drift-monitor serve
+```
+
+Enrutar la salida a un archivo con `--sink` (la salida es NDJSON, una línea por evento):
+
+```bash
+# Volcar drift/arrival/removal del barrido a un log persistente
+mcp-drift-monitor sweep --feed-url https://registry.example/servers \
+  --sink file:drift-events.ndjson
+
+# Lo mismo para polling incremental
+mcp-drift-monitor poll --feed-url https://registry.example/servers \
+  --sink file:poll-events.ndjson
+
+# Replay a archivo
+mcp-drift-monitor replay --panel data/mcp_registry_drift_panel_v1.jsonl \
+  --sink file:replay-report.ndjson
+```
+
+Cada evento emitido lleva `obs_index` y `ts` reales (UTC), p. ej.:
+
+```json
+{"event": "drift", "server_id": "srv_123", "old_desc_hash": "a1b2", "new_desc_hash": "c3d4", "obs_index": 7, "ts": "2026-08-23T10:15:32.481027+00:00"}
 ```
 
 ## Tests

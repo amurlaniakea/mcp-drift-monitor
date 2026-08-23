@@ -49,7 +49,13 @@ CREATE TABLE IF NOT EXISTS obs_counter (
 class StateStore:
     def __init__(self, path: str = "drift.sqlite"):
         self.path = str(path)
-        self._conn = sqlite3.connect(self.path)
+        # isolation_level=None => autocommit; we manage BEGIN/COMMIT explicitly so
+        # BEGIN IMMEDIATE can take a write lock (serializes get_next_obs_index across
+        # processes). busy_timeout makes contending writers wait instead of raising
+        # 'database is locked'. WAL lets readers proceed while a writer holds the lock.
+        self._conn = sqlite3.connect(self.path, isolation_level=None)
+        self._conn.execute("PRAGMA busy_timeout = 30000")
+        self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         # Seed fetch status row (id=1) so last_fetch_status always has a value.
@@ -145,19 +151,42 @@ class StateStore:
         """Monotonic, persisted observation counter (survives restarts).
 
         Each fetch (poll or sweep) consumes exactly one obs_index. Stored in
-        the obs_counter table (id=1). Atomic read-modify-write within the
-        sqlite connection's transaction so two concurrent fetches cannot get
-        the same index.
+        the obs_counter table (id=1).
+
+        ATOMIC across processes/connections: a single ``UPDATE ... RETURNING``
+        statement reads the current value, increments it, and returns the new
+        value in one fell swoop — the increment is a single atomic write inside
+        SQLite, so no two committed connections can ever read the same counter.
+        We further wrap it in ``BEGIN IMMEDIATE`` so the write lock is taken up
+        front; contending callers block (busy_timeout) instead of racing. This
+        closes the concurrency bug where a SELECT-then-INSERT across two
+        separate connections could hand out duplicate indices. Verified by
+        tests/test_state.py::test_get_next_obs_index_concurrent_no_duplicates
+        (30 real processes).
         """
-        row = self._conn.execute("SELECT value FROM obs_counter WHERE id = 1").fetchone()
-        nxt = (row[0] if row else 0) + 1
-        self._conn.execute(
-            "INSERT INTO obs_counter (id, value) VALUES (1, ?) "
-            "ON CONFLICT(id) DO UPDATE SET value = excluded.value",
-            (nxt,),
-        )
-        self._conn.commit()
-        return nxt
+        # BEGIN IMMEDIATE takes the write lock before any read; combined with the
+        # single-statement increment below, the read-modify-write is serialized.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                "UPDATE obs_counter SET value = value + 1 WHERE id = 1 "
+                "RETURNING value"
+            ).fetchone()
+            if row is None:
+                # Counter row not seeded (should not happen) — seed defensively.
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO obs_counter (id, value) VALUES (1, 0)"
+                )
+                row = self._conn.execute(
+                    "UPDATE obs_counter SET value = value + 1 WHERE id = 1 "
+                    "RETURNING value"
+                ).fetchone()
+            nxt = int(row[0])
+            self._conn.execute("COMMIT")
+            return nxt
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def append_events(
         self,
